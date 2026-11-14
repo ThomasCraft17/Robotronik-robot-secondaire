@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Control</title>
+<style>
+  :root { --bg:#14181c; --fg:#e8edf2; --dim:#7b8794; --on:#3ddc97; --off:#242b33; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; }
+  main { width:min(92vw,420px); text-align:center; }
+  #status { color:var(--dim); margin-bottom:1rem; }
+  #level { font-size:1.4rem; margin-bottom:1rem; }
+  #pad { position:relative; width:240px; height:240px; margin:0 auto 1.5rem; border-radius:50%; background:var(--off); }
+  #dot { position:absolute; width:56px; height:56px; border-radius:50%; background:var(--on); left:92px; top:92px; }
+  .bumpers { display:flex; gap:1rem; justify-content:center; }
+  .b { flex:1; padding:1rem; border-radius:12px; background:var(--off); }
+  .b.on { background:var(--on); color:#08130d; }
+  p.help { color:var(--dim); font-size:.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <div id="status">Connexion…</div>
+  <div id="level">Vitesse : 0 / 5</div>
+  <div id="pad"><div id="dot"></div></div>
+  <div class="bumpers"><div class="b" id="L">L</div><div class="b" id="R">R</div></div>
+  <p class="help">Clavier : Z = accélérer d'un cran, S = ralentir d'un cran (5 crans), Q / D = gauche / droite, Espace = arrêt, A = L, E = R.<br>Manette : joystick gauche = direction, R2 = avancer, L2 = reculer (0 à 5 selon la pression).</p>
+</main>
+<script>
+const status = document.getElementById("status");
+const dot = document.getElementById("dot");
+const lvl = document.getElementById("level");
+const elL = document.getElementById("L"), elR = document.getElementById("R");
+
+// --- WebSocket with auto-reconnect ---
+let ws;
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen  = () => status.textContent = "Connecté";
+  ws.onclose = () => { level = 0; status.textContent = "Déconnecté, nouvelle tentative…"; setTimeout(connect, 1000); };
+}
+connect();
+
+// --- Keyboard (AZERTY: we read the typed letter) ---
+// Z / S are INCREMENTAL: each press changes the speed level by one step.
+// Q / D (steering) are active while held. Space = emergency stop.
+const MAX_LEVEL = 5;
+let level = 0;                       // -5 (full reverse) .. +5 (full forward)
+const keys = new Set();
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (!e.repeat) {                   // holding the key does not keep accelerating
+    if (k === "z") level = Math.min(MAX_LEVEL, level + 1);
+    if (k === "s") level = Math.max(-MAX_LEVEL, level - 1);
+    if (k === " ") { level = 0; e.preventDefault(); }
+  }
+  keys.add(k);
+});
+addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+addEventListener("blur", () => { keys.clear(); level = 0; });  // stop if the tab loses focus
+
+function readKeyboard() {
+  return {
+    x: (keys.has("d") ? 1 : 0) - (keys.has("q") ? 1 : 0),
+    y: level / MAX_LEVEL,
+    l: keys.has("a"), r: keys.has("e"),
+  };
+}
+
+// --- Gamepad (standard mapping) ---
+// Left stick X = steering. R2 trigger = forward, L2 trigger = reverse.
+// Each trigger is analog: pushing it 0..100% gives a speed of 0..5.
+// (buttons[6] = L2, buttons[7] = R2; L1 / R1 are not used)
+const DEAD = 0.15, TRIG_DEAD = 0.05;
+const dz = (v, d) => Math.abs(v) < d ? 0 : v;
+function readGamepad() {
+  const gp = [...navigator.getGamepads()].find(Boolean);
+  if (!gp) return null;
+  const fwd = dz(gp.buttons[7]?.value ?? 0, TRIG_DEAD);   // R2
+  const back = dz(gp.buttons[6]?.value ?? 0, TRIG_DEAD);  // L2
+  return { x: dz(gp.axes[0], DEAD), y: fwd - back, l: false, r: false };
+}
+
+// --- Main loop: send ~30 times per second ---
+setInterval(() => {
+  const k = readKeyboard(), g = readGamepad() || { x:0, y:0, l:false, r:false };
+  // Gamepad wins when it is being used, otherwise keyboard
+  const gActive = g.x || g.y || g.l || g.r;
+  const c = gActive ? g : k;
+  if (ws.readyState === 1) ws.send(JSON.stringify(c));
+  dot.style.transform = `translate(${c.x * 80}px, ${-c.y * 80}px)`;
+  lvl.textContent = `Vitesse : ${(c.y * MAX_LEVEL).toFixed(gActive ? 1 : 0)} / ${MAX_LEVEL}`;
+  elL.classList.toggle("on", !!c.l);
+  elR.classList.toggle("on", !!c.r);
+}, 33);
+</script>
+</body>
+</html>
